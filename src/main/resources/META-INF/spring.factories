@@ -1,0 +1,2 @@
+org.springframework.boot.autoconfigure.EnableAutoConfiguration=\
+com.github.niushuai233.mybatis.xml.reloader.config.XmlMapperReLoaderConfig
