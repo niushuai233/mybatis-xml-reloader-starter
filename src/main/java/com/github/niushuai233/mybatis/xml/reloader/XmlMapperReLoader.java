@@ -1,6 +1,11 @@
 package com.github.niushuai233.mybatis.xml.reloader;
 
 import org.apache.ibatis.builder.xml.XMLMapperBuilder;
+import org.apache.ibatis.builder.xml.XMLMapperEntityResolver;
+import org.apache.ibatis.mapping.MappedStatement;
+import org.apache.ibatis.mapping.ResultMap;
+import org.apache.ibatis.parsing.XNode;
+import org.apache.ibatis.parsing.XPathParser;
 import org.apache.ibatis.session.Configuration;
 import org.apache.ibatis.session.SqlSessionFactory;
 import org.slf4j.Logger;
@@ -71,6 +76,7 @@ public class XmlMapperReLoader {
     public void readMapperXml() {
         try {
             Configuration configuration = sqlSessionFactory.getConfiguration();
+
             // step.1 扫描文件
             try {
                 this.scanMapperXml();
@@ -78,18 +84,29 @@ public class XmlMapperReLoader {
                 throw new RuntimeException("package " + packageSearchPath + " search path error");
             }
 
+            boolean mybatisPlusORM = true;
+
             // 2 判断是否有文件发生了变化
             if (this.isChanged()) {
                 // 2.1 清理
-                this.removeConfig(configuration);
+                if (!mybatisPlusORM) {
+                    // 若是mybatis时 非mp
+                    this.removeConfig(configuration);
+                }
                 // 2.2 重新加载
                 for (org.springframework.core.io.Resource configLocation : mapperLocations) {
                     try {
-                        XMLMapperBuilder xmlMapperBuilder = new XMLMapperBuilder(configLocation.getInputStream(), configuration, configLocation.toString(), configuration.getSqlFragments());
+
+                        if (mybatisPlusORM) {
+                            // 若是mp时
+                            mybatisPlusRemoveConfig(sqlSessionFactory, configuration, configLocation);
+                        }
+
+                        XMLMapperBuilder xmlMapperBuilder = new XMLMapperBuilder(
+                                configLocation.getInputStream(), configuration, configLocation.toString(), configuration.getSqlFragments());
                         xmlMapperBuilder.parse();
                     } catch (IOException e) {
                         log.info("Mapper [" + configLocation.getFilename() + "] doesn't exist or the content format is wrong");
-                        continue;
                     }
                 }
             }
@@ -103,6 +120,52 @@ public class XmlMapperReLoader {
         } catch (Exception e) {
             e.printStackTrace();
         }
+    }
+
+    private void mybatisPlusRemoveConfig(SqlSessionFactory sqlSessionFactory, Configuration configuration, Resource configLocation) {
+        XPathParser parser = null;
+        try {
+            parser = new XPathParser(configLocation.getInputStream(), true, configuration.getVariables(), new XMLMapperEntityResolver());
+        } catch (Exception e) {
+            log.error("Could not parse configuration", e);
+        }
+        XNode mapperXNode = parser.evalNode("/mapper");
+        String namespace = mapperXNode.getStringAttribute("namespace");
+
+        Map<String, ResultMap> resultMapsMap = (Map<String, ResultMap>) getFieldValue(configuration, configuration.getClass(), "resultMaps");
+        List<XNode> resultMapNodeList = mapperXNode.evalNodes("/mapper/resultMap");
+        for (XNode node : resultMapNodeList) {
+            String id = node.getStringAttribute("id", node.getValueBasedIdentifier());
+            Iterator<Map.Entry<String, ResultMap>> iterator = resultMapsMap.entrySet().iterator();
+            while (iterator.hasNext()) {
+                Map.Entry<String, ResultMap> next = iterator.next();
+                String key = next.getKey();
+                if (key.contains(namespace + "." + id)) {
+                    iterator.remove();
+                }
+                if (key.contains(namespace + ".mapper_resultMap")) {
+                    iterator.remove();
+                }
+            }
+        }
+
+        Map<String, XNode> sqlFragmentsMap = (Map<String, XNode>) getFieldValue(configuration, configuration.getClass(), "sqlFragments");
+        List<XNode> sqlNodeList = mapperXNode.evalNodes("/mapper/sql");
+        for (XNode sqlNode : sqlNodeList) {
+            String id = sqlNode.getStringAttribute("id", sqlNode.getValueBasedIdentifier());
+            sqlFragmentsMap.remove(namespace + "." + id);
+        }
+
+        Map<String, MappedStatement> mappedStatementsMap = (Map<String, MappedStatement>) getFieldValue(configuration, configuration.getClass(), "mappedStatements");
+        List<XNode> _4nodeList = mapperXNode.evalNodes("select|insert|update|delete");
+        for (XNode _4node : _4nodeList) {
+            String id = _4node.getStringAttribute("id", _4node.getValueBasedIdentifier());
+            mappedStatementsMap.remove(namespace + "." + id);
+        }
+
+        Set<String> loadedResourcesSet = (Set<String>) getFieldValue(configuration, configuration.getClass().getSuperclass(), "loadedResources");
+        loadedResourcesSet.clear();
+
     }
 
     /**
@@ -186,5 +249,16 @@ public class XmlMapperReLoader {
             }
         }
         return flag;
+    }
+
+    private static Object getFieldValue(Configuration targetConfiguration, Class<?> targetClass, String filedName) {
+        try {
+            Field declaredField = targetClass.getDeclaredField(filedName);
+            declaredField.setAccessible(true);
+            return declaredField.get(targetConfiguration);
+        } catch (Exception e) {
+            log.error("无法通过反射获取对象值 class: {}, field: {}, 异常信息: {}", targetClass.getName(), filedName, e.getMessage());
+            throw new RuntimeException(e);
+        }
     }
 }
